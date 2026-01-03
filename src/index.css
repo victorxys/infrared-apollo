@@ -1,0 +1,25 @@
+@import "tailwindcss";
+
+@theme {
+    --color-zinc-950: #09090b;
+    --color-zinc-900: #18181b;
+    --color-zinc-800: #27272a;
+    --color-zinc-100: #f4f4f5;
+}
+
+/* Fallback for v4 if import fails or using v3 compat, but actually we use v4 via postcss so @tailwind directives are deprecated in favor of @import "tailwindcss" usually, BUT forcing compat mode with @tailwind directives is safer for mix of tools. 
+   Let's stick to the directives since we have the postcss plugin which handles them.
+*/
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+    :root {
+        color-scheme: dark;
+    }
+
+    body {
+        @apply bg-zinc-950 text-zinc-100;
+    }
+}
