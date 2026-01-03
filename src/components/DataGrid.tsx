@@ -1,18 +1,17 @@
 import { useMemo } from 'react';
 import { AgGridReact } from 'ag-grid-react';
 import { AllCommunityModule, ModuleRegistry, themeQuartz } from 'ag-grid-community';
+import type { GridReadyEvent } from 'ag-grid-community';
 
 // Register all Community features
 ModuleRegistry.registerModules([AllCommunityModule]);
 
 interface DataGridProps {
-    rowData: any[];
     schema: { name: string; type: string }[];
-    emptyMessage?: string;
-    emptySubMessage?: string;
+    onGridReady?: (params: GridReadyEvent) => void;
 }
 
-export function DataGrid({ rowData, schema, emptyMessage = "No data to display.", emptySubMessage }: DataGridProps) {
+export function DataGrid({ schema, onGridReady }: DataGridProps) {
     const colDefs = useMemo(() => {
         if (!schema || schema.length === 0) return [];
         return schema.map((col) => {
@@ -21,22 +20,16 @@ export function DataGrid({ rowData, schema, emptyMessage = "No data to display."
             return {
                 field: col.name,
                 headerName: col.name,
-                filter: true,
+                filter: 'agTextColumnFilter', // Enable text filter by default for all columns in infinite mode
                 sortable: true,
                 flex: 1,
                 minWidth: 150,
                 valueFormatter: isTimestamp ? (params: any) => {
                     if (!params.value) return '';
-                    // Handle microsecond timestamps (19 digits) vs millisecond (13 digits)
                     let val = Number(params.value);
-
-                    // If reasonable year (e.g. > 1971) when treated as seconds, milliseconds, or microseconds
-                    // Simple heuristic: if > 1e16 (microseconds for recent dates), divide by 1000
-                    // If DuckDB returns bigints for micros:
-                    if (val > 10000000000000) { // e.g. 1767155612954000 (micros)
+                    if (val > 10000000000000) {
                         val = val / 1000;
                     }
-
                     try {
                         return new Date(val).toLocaleString('en-US', { timeZone: 'America/New_York', hour12: false }) + ' ET';
                     } catch (e) {
@@ -49,27 +42,29 @@ export function DataGrid({ rowData, schema, emptyMessage = "No data to display."
 
     const defaultColDef = useMemo(() => ({
         resizable: true,
+        filterParams: {
+            buttons: ['apply', 'clear'],
+        }
     }), []);
 
-    if (!rowData || rowData.length === 0) {
-        return (
-            <div className="flex flex-col items-center justify-center p-12 text-zinc-500 border border-zinc-800 rounded-lg bg-zinc-900/50 h-[400px]">
-                <p className="text-lg font-medium text-zinc-400">{emptyMessage}</p>
-                {emptySubMessage && (
-                    <p className="mt-2 text-sm text-zinc-500 max-w-md text-center">{emptySubMessage}</p>
-                )}
-            </div>
-        )
-    }
-
     return (
-        <div className="h-[600px] w-full bg-zinc-900 border border-zinc-800 rounded-lg overflow-hidden shadow-inner">
+        <div className="h-[600px] w-full bg-zinc-900 border border-zinc-800 rounded-lg overflow-hidden shadow-inner flex flex-col">
+            {/* Custom Overlay for empty state if needed, but AgGrid has its own. 
+               For now relying on AgGrid's infinite loader visual. 
+           */}
             <AgGridReact
-                rowData={rowData}
                 columnDefs={colDefs}
                 defaultColDef={defaultColDef}
                 theme={themeQuartz}
                 className="h-full w-full"
+
+                // Infinite Row Model Settings
+                rowModelType="infinite"
+                cacheBlockSize={100}
+                maxBlocksInCache={20}
+                infiniteInitialRowCount={100}
+
+                onGridReady={onGridReady}
             />
         </div>
     );

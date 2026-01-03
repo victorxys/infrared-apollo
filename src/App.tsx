@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { AsyncDuckDBConnection, AsyncDuckDB } from '@duckdb/duckdb-wasm';
 import { initDuckDB } from './lib/duckdb';
+import { buildSql } from './lib/sqlBuilder';
 import { DropZone } from './components/DropZone';
 import { DataGrid } from './components/DataGrid';
 import { SchemaViewer } from './components/SchemaViewer';
@@ -9,6 +10,7 @@ import { SqlEditor } from './components/SqlEditor';
 import { LoadingSpinner } from './components/LoadingSpinner';
 import { Database, AlertCircle, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 import { clsx } from 'clsx';
+import type { GridReadyEvent, IDatasource } from 'ag-grid-community';
 
 interface SchemaItem {
   name: string;
@@ -24,14 +26,12 @@ function App() {
 
   const [fileName, setFileName] = useState<string | null>(null);
   const [schema, setSchema] = useState<SchemaItem[]>([]);
-  const [data, setData] = useState<any[]>([]);
+  // const [data, setData] = useState<any[]>([]); // Not used in infinite mode
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
 
   // Pagination state
-  const [page, setPage] = useState(1);
-  const [pageSize] = useState(1000);
-  const [totalRows, setTotalRows] = useState(0);
   const [viewMode, setViewMode] = useState<'file' | 'query'>('file');
+  const [currentTableName, setCurrentTableName] = useState('parquet_file');
 
   // Initialize DuckDB
   useEffect(() => {
@@ -50,21 +50,38 @@ function App() {
     init();
   }, []);
 
-  const fetchPage = useCallback(async (pageNum: number) => {
+  // Grid Datasource
+  const onGridReady = useCallback((params: GridReadyEvent) => {
     if (!conn) return;
-    setProcessing(true);
-    try {
-      const offset = (pageNum - 1) * pageSize;
-      const dataResult = await conn.query(`SELECT * FROM parquet_file LIMIT ${pageSize} OFFSET ${offset}`);
-      setData(dataResult.toArray().map((row) => row.toJSON()));
-      setPage(pageNum);
-    } catch (err: any) {
-      console.error(err);
-      setError("Failed to fetch page: " + err.message);
-    } finally {
-      setProcessing(false);
-    }
-  }, [conn, pageSize]);
+
+    const datasource: IDatasource = {
+      getRows: async (params) => {
+        try {
+          const tableName = currentTableName;
+          const { query, countQuery } = buildSql(tableName, params);
+
+          console.log("Executing SQL:", query);
+
+          // 1. Get total count
+          const countResult = await conn.query(countQuery);
+          const totalRows = Number(countResult.toArray()[0].total);
+
+          // 2. Get data
+          const dataResult = await conn.query(query);
+          const rows = dataResult.toArray().map((row) => row.toJSON());
+
+          params.successCallback(rows, totalRows);
+
+        } catch (err: any) {
+          console.error("Grid Fetch Error", err);
+          params.failCallback();
+          setError("Failed to fetch data: " + err.message);
+        }
+      }
+    };
+
+    params.api.setGridOption('datasource', datasource);
+  }, [conn, currentTableName]);
 
   const handleFileSelect = useCallback(async (file: File) => {
     if (!conn || !db) return;
@@ -72,9 +89,9 @@ function App() {
     setProcessing(true);
     setError(null);
     setFileName(file.name);
-    setData([]);
     setSchema([]);
     setViewMode('file');
+    setCurrentTableName('parquet_file');
 
     try {
       // Register file
@@ -83,6 +100,7 @@ function App() {
       // Create table alias for easier querying
       await conn.query(`DROP VIEW IF EXISTS parquet_file`);
       await conn.query(`CREATE VIEW parquet_file AS SELECT * FROM '${file.name}'`);
+      await conn.query(`DROP VIEW IF EXISTS current_query_view`); // cleanup
 
       // Describe schema
       const schemaResult = await conn.query(`DESCRIBE parquet_file`);
@@ -92,35 +110,35 @@ function App() {
       }));
       setSchema(schemaData);
 
-      // Get total rows
-      const countResult = await conn.query(`SELECT COUNT(*) as total FROM parquet_file`);
-      const total = Number(countResult.toArray()[0].total);
-      setTotalRows(total);
-
-      // Fetch first page
-      // We manually call the logic of fetchPage here to avoid dependency issues or waiting for state updates
-      const dataResult = await conn.query(`SELECT * FROM parquet_file LIMIT ${pageSize} OFFSET 0`);
-      setData(dataResult.toArray().map((row) => row.toJSON()));
-      setPage(1);
-
     } catch (err: any) {
       console.error(err);
       setError("Failed to process parquet file: " + err.message);
     } finally {
       setProcessing(false);
     }
-  }, [conn, db, pageSize]);
+  }, [conn, db]);
 
   const handleRunQuery = useCallback(async (query: string) => {
     if (!conn) return;
     setProcessing(true);
     setError(null);
     setViewMode('query');
-    try {
-      const result = await conn.query(query);
-      setData(result.toArray().map((row) => row.toJSON()));
 
-      // Optionally update schema if query changes columns (too complex for now, keep file schema)
+    try {
+      // Create a view for the custom query so we can paginate over it!
+      await conn.query(`DROP VIEW IF EXISTS current_query_view`);
+      await conn.query(`CREATE VIEW current_query_view AS ${query}`);
+
+      setCurrentTableName('current_query_view');
+
+      // Update schema for the new view
+      const schemaResult = await conn.query(`DESCRIBE current_query_view`);
+      const schemaData = schemaResult.toArray().map((row: any) => ({
+        name: row.column_name,
+        type: row.column_type
+      }));
+      setSchema(schemaData);
+
     } catch (err: any) {
       let errorMessage = "Query error: " + err.message;
       if (err.message.includes('Binder Error') && err.message.includes('Referenced column') && err.message.includes('not found')) {
@@ -189,7 +207,7 @@ function App() {
                   <SchemaViewer schema={schema} />
                 </div>
                 <button
-                  onClick={() => { setFileName(null); setData([]); setSchema([]); }}
+                  onClick={() => { setFileName(null); setSchema([]); }}
                   className="w-full min-w-[300px] py-2 px-4 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-lg text-sm transition-colors"
                 >
                   Load Another File
@@ -213,41 +231,18 @@ function App() {
                   </div>
                 ) : (
                   <DataGrid
-                    rowData={data}
+                    key={currentTableName}
                     schema={schema}
-                    emptyMessage={viewMode === 'query' ? "Query returned 0 results" : "No data on this page"}
-                    emptySubMessage={viewMode === 'query'
-                      ? "Check your WHERE clause. Text values must match exactly (case-sensitive) and have no hidden whitespace. Try using LIKE '%value%' to find it."
-                      : "Try navigating to another page."}
+                    onGridReady={onGridReady}
                   />
                 )}
                 <div className="mt-2 flex justify-between items-center text-xs text-gray-500">
-                  <div>
-                    {viewMode === 'file' ? (
-                      <span>Showing page {page} of {Math.ceil(totalRows / pageSize)} ({totalRows} total rows)</span>
-                    ) : (
-                      <span>Showing {data.length} rows (Custom Query)</span>
-                    )}
-                  </div>
-
-                  {viewMode === 'file' && totalRows > pageSize && (
-                    <div className="flex space-x-2">
-                      <button
-                        onClick={() => fetchPage(page - 1)}
-                        disabled={page === 1 || processing}
-                        className="px-3 py-1 bg-zinc-800 rounded hover:bg-zinc-700 disabled:opacity-50 disabled:cursor-not-allowed text-zinc-300 transition-colors"
-                      >
-                        Previous
-                      </button>
-                      <button
-                        onClick={() => fetchPage(page + 1)}
-                        disabled={page * pageSize >= totalRows || processing}
-                        className="px-3 py-1 bg-zinc-800 rounded hover:bg-zinc-700 disabled:opacity-50 disabled:cursor-not-allowed text-zinc-300 transition-colors"
-                      >
-                        Next
-                      </button>
-                    </div>
-                  )}
+                  <span>
+                    {viewMode === 'query' ? "Viewing Custom Query Results" : "Viewing File Content"}
+                  </span>
+                  <span>
+                    {/* Infinite Scroll - Filter/Sort supported */}
+                  </span>
                 </div>
               </div>
             </div>
